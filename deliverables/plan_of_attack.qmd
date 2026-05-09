@@ -1,0 +1,203 @@
+﻿---
+title: "Plan of Attack"
+format: pdf
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+library(tidyverse)
+library(gt)
+
+# Load data
+data <- read_csv('../data/hillstrom_data.csv')
+```
+
+
+**Research question**: Does the causal effect of email marketing on revenue depend on how recently a customer last purchased, and what does this imply about how retailers should allocate promotional campaigns?
+
+Email campaigns are not free — there is a cost to sending, and not every customer responds. A natural hypothesis is that a customer who purchased two months ago is easier to re-engage than one who has not purchased in nearly a year. If email effectiveness varies systematically with recency, a retailer can do better than blasting the same campaign to everyone: it can concentrate sends where the incremental return is highest and suppress sends where the lift does not cover the cost.
+
+This motivates a more specific operational question: for each recency based customer group (Warm, Cooling, Dormant, Very dormant), should the retailer send the Mens E-Mail campaign, the Womens E-Mail campaign, or no email, in order to maximize incremental profit at an assumed $0.01 per email send cost?
+
+
+## Section 1: Raw Daw Description
+
+The Hillstrom Email Marketing Experiment dataset contains 64,000 observations. Each observation is uniquely identified by a customer (each row is one customer; no duplicates). Each row represents a single customer, with pre-experiment attributes and post-experiment outcomes. The data covers a single two-week post-campaign window. Key fields are:
+
+```{r}
+#| echo: false
+tibble(
+  Field = c(
+    "`recency`", "`history`", "`history_segment`",
+    "`mens`", "`womens`", "`zip_code`",
+    "`newbie`", "`channel`", "`segment`",
+    "`visit`", "`conversion`", "`spend`"
+  ),
+  Description = c(
+    "Months since last purchase",
+    "Dollar value of past purchases",
+    "Binned dollar value of past purchases e.g. $100 - $200",
+    "1 if customer purchased men's merchandise in the past",
+    "1 if customer purchased women's merchandise in the past",
+    "Urban, suburban, or rural",
+    "1 if new customer in the past 12 months",
+    "Purchase channel: phone, web, or multichannel",
+    "Treatment group: Mens E-Mail, Womens E-Mail, or No E-Mail",
+    "1 if the customer visited the website in the following 2 weeks",
+    "1 if the customer made a purchase",
+    "Dollar amount spent"
+  )
+) |>
+  gt() |>
+  fmt_markdown(columns = Field)
+```
+
+The data covers 64,000 customers randomly assigned in equal thirds to the three groups (approximately 21,333 per arm). Our dependent variables are `visit`, `conversion`, and `spend`. Our key independent variable is `segment` (treatment group). Pre-experiment covariates (`history`, `history_segment`, `recency`, `mens`, `womens`, `zip_code`, `newbie`, `channel`) are available for heterogeneous-effect exploration.
+
+Summary statistics for the key variables are in the table below. The three dependent variables are: `visit`, `conversion`, and `spend`. The treatment variable (indicator) is `segment`. The remaining fields are pre-treatment covariates used for balance checks and
+heterogeneous-effects analysis.
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+summary_table <- data %>%
+  mutate(
+    `Mens E-Mail (0/1)` = if_else(segment == "Mens E-Mail", 1, 0),
+    `Womens E-Mail (0/1)` = if_else(segment == "Womens E-Mail", 1, 0),
+    `No E-Mail (0/1)` = if_else(segment == "No E-Mail", 1, 0)
+  ) %>%
+  select(
+    `visit (0/1)` = visit,
+    `conversion (0/1)` = conversion,
+    `spend ($)` = spend,
+    `Mens E-Mail (0/1)`,
+    `Womens E-Mail (0/1)`,
+    `No E-Mail (0/1)`,
+    `history ($)` = history,
+    `recency (months)` = recency,
+    `mens (0/1)` = mens,
+    `womens (0/1)` = womens,
+    `newbie (0/1)` = newbie
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "value"
+  ) %>%
+  group_by(Variable) %>%
+  summarize(
+    Mean = mean(value, na.rm = TRUE),
+    SD = sd(value, na.rm = TRUE),
+    Min = min(value, na.rm = TRUE),
+    Median = median(value, na.rm = TRUE),
+    Max = max(value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    across(
+      c(Mean, SD, Min, Median, Max),
+      ~ round(.x, 3)
+    )
+  )
+
+summary_table |>
+  gt(rowname_col = "Variable") |>
+  tab_caption("Summary statistics, full sample (64,000 customers)") |>
+  tab_row_group(label = "Dependent variables",      rows = 1:3) |>
+  tab_row_group(label = "Treatment (segment)",      rows = 4:6) |>
+  tab_row_group(label = "Pre-treatment covariates", rows = 7:11)
+```
+
+
+**Contingencies.** Because `spend` is heavily right-skewed (a small share of customers drive most of the revenue), every spend-based estimate is reported in two forms: (1) the raw mean difference between arms, which is the headline, and (2) the same difference with `spend` winsorized at the 99th percentile of the full sample, which is the outlier-sensitivity check. Binary `visit` and `conversion` require no outlier handling.
+
+## Section 2: Sample Construction Plan
+
+1. **Sample window.** The experiment ran at a single point in time, so there is no sample-window decision. Use all 64,000 observations. *Why:* The dataset itself is the entire experiment; there is no sub-period to carve out.
+
+2. **Sample restrictions.** No observations will be dropped for the main intent-to-treat analysis. *Why:* Dropping observations post-randomization breaks the random-assignment guarantee and biases the estimate — one of the most common mistakes in applied A/B testing. In particular, do not drop non-visitors, non-converters, or zero-spend customers; the headline statistic is mean spend per *assigned* customer, including zeros. The only acceptable exclusion is a missing required analysis variable. Observations with `recency` outside 1–12 are flagged via `recency_out_of_range` but retained, and dropped only from the per-bin analyses where they cannot be assigned to a recency bin.
+
+3. **Dependent variable integrity.**
+- `visit` and `conversion`: Binary; verify coding is $\{0, 1\}$ with no missing values.
+- `spend`: Continuous and right-skewed. For the headline estimate, use the raw mean difference between arms. For sensitivity, winsorize at the 99th percentile of the full sample (not by arm or by bin) and report the mean difference again.
+
+*Why:* A few large spenders can move the raw mean substantially. The winsorized version shows whether the headline is driven by those outliers or by the bulk of customers. Winsorizing at the full-sample percentile (rather than per arm or per bin) preserves the comparability of the arms; cutting tails differently within each group would itself bias the comparison.
+
+4. **Treatment indicators.** `segment` is already clean and has three randomized arms: `No E-Mail` (control), `Mens E-Mail`, and `Womens E-Mail`. Construct two binary indicators alongside the raw factor: `mens_email = 1` if `segment == "Mens E-Mail"` and `womens_email = 1` if `segment == "Womens E-Mail"`. The control arm `No E-Mail` is the implicit reference category.
+
+*Why:* The three-arm design lets us estimate three pairwise comparisons of interest — Mens − No E-Mail, Womens − No E-Mail, and Mens − Womens. Collapsing the two email arms into a single "any email" specification would hide whether the two campaigns differ, which is itself part of the targeting question.
+
+5. **Recency bin construction.** Bin `recency` into four ordered groups using pre-specified 3-month lifecycle windows:
+
+| recency_bin   | Definition       | Business meaning      |
+|---------------|------------------|-----------------------|
+| Warm          | recency 1–3      | Bought recently       |
+| Cooling       | recency 4–6      | Starting to drift     |
+| Dormant       | recency 7–9      | Needs reactivation    |
+| Very dormant  | recency 10–12    | Hardest to reactivate |
+
+Treat `recency_bin` as an ordered factor with the levels in that order. Bins are defined *before* looking at any treatment effects.
+
+*Why:* Pre-specified, business-interpretable bins make recency the central segmentation variable without letting the cutoffs be tuned to the result. Three-month windows are coarse enough to give every (bin × arm) cell a comfortably large sample and fine enough to separate genuinely different lifecycle states. The 4 × 3 = 12 main cells balance subgroup resolution against statistical credibility (see Item 6).
+
+6. **Cell counts (Table 2).** Compute per-(recency_bin × segment) cell sizes and write them to `tables/table2_recency_arm_counts.csv`. Visualize as a grouped bar chart with a horizontal reference line at $n = 500$. Flag any cell that falls below the threshold.
+
+*Why:* Subgroup treatment effects are only as credible as the cell sizes that produce them. With $n = 64{,}000$ split across 12 cells and a heavily right-skewed outcome, we want each cell to contain enough observations that the per-cell SE is small. $n = 500$ is the practical lower bound below which we would caveat the result.
+
+## Section 3: Analysis Plan
+
+1. **Research design.** Our question is causal: does email marketing increase incremental revenue more for some recency groups than others, and what does that imply for targeting? Because customers were randomly assigned to the three arms, the arms are comparable on average — any post-treatment difference in outcomes is, in expectation, caused by the treatment. Recency is measured *before* the experiment, so estimating treatment effects within each recency bin uses no post-treatment information and preserves the randomized comparison. We verify that randomization was implemented correctly through a pre-treatment covariate balance test (Robustness Check 3).
+
+2. **Key analyses.**
+
+*A note on confidence intervals.* Because this is a randomized experiment, 95% confidence intervals on every treatment-effect estimate are computed cleanly using the two-sample SE,
+
+$$\operatorname{SE} = \sqrt{\frac{\mathrm{var}(Y_t)}{n_t} + \frac{\mathrm{var}(Y_c)}{n_c}}, \qquad \mathrm{CI} = \hat{\tau} \pm 1.96 \cdot SE.$$
+
+Every estimate in this section — bars in Figure 0, points in Figures 1 and 2, and the per-arm lifts in Figure 3 — is reported with its 95% CI.
+
+*Baseline (Figure 0): Overall email effects on spend.* Three bars (No E-Mail, Mens E-Mail, Womens E-Mail) showing mean spend per customer with 95% CIs. Horizontal dashed line at the No E-Mail mean. Annotate each treatment bar with the dollar lift and percentage lift over control.
+
+*Why:* Before drilling down into recency heterogeneity, we need the unconditional headline: do emails move spend on average? If the average effect is essentially zero, the recency story is moot. The baseline also acts as the comparison anchor for the per-bin estimates in Analysis 1 — we want to know whether per-bin lifts deviate substantially from the average.
+
+*Analysis 1 (Figure 1): Spend lift by recency bin.* Forest plot, faceted by comparison (Mens − No E-Mail, Womens − No E-Mail, Mens − Womens). Rows = recency bins, ordered Warm at the top → Very dormant at the bottom. Each row shows a point estimate plus 95% CI on the dollar spend lift. Vertical reference line at zero. Per-point dollar label so the magnitude is readable without parsing the x-axis. As an alternate presentation, also produce a faceted-bar version (mean spend by arm faceted by recency bin, fixed y-scale across panels so cross-bin contrasts are honest).
+
+*Why:* This is the main figure. It directly answers whether email is most valuable for Warm, Cooling, Dormant, or Very dormant customers and whether one campaign clearly dominates within each bin. If lifts are flat across recency, recency-based targeting offers nothing over a uniform send policy. If they are differential, the bin-level pattern *is* the targeting opportunity, and the third panel (Mens − Womens) tells us which campaign to pick when they disagree.
+
+*Analysis 2 (Figure 2): Causal funnel decomposition by recency bin.* Three-panel faceted forest plot — Panel 1: visit lift (percentage points), Panel 2: conversion lift (percentage points), Panel 3: spend lift (\$/customer). Within each panel, rows = recency bins with two dodged points per row (Mens − No E-Mail, Womens − No E-Mail). Free x-scales per panel because units differ across panels. Crucially, all three outcomes are estimated intent-to-treat: not conditional on having visited or having purchased.
+
+*Why:* If a campaign moves spend, we want to know *how*. Three patterns are interpretable: (1) email raises visit but not conversion or spend → the campaign creates traffic without revenue; (2) email raises visit and conversion → reactivation is working as intended; (3) email raises spend without raising visit or conversion → existing visitors are buying more on the same trip. The decomposition diagnoses which lever the campaign is pulling per recency bin and tells marketing where to focus follow-up work. We keep all three outcomes ITT because conditioning on visit or purchase breaks the randomized comparison: treatment may itself change who becomes a visitor, so the conditional sample is no longer comparable across arms.
+
+*Analysis 3 (Figure 3): Targeting policy recommendation.* For each recency bin, compute incremental profit per arm,
+
+$$\mathrm{profit}_a = \hat{\tau}_a - \$0.01,$$
+
+where $\hat{\tau}_a$ is the per-customer spend lift for arm $a \in \{\text{Mens}, \text{Womens}\}$ and \$0.01 is the assumed per-email send cost. Apply the following decision rules in order:
+
+1. Both arms have profit $\leq 0$ → recommend `No E-Mail` (Suppress).
+2. Both arms profit $> 0$ AND the Mens − Womens 95% CI excludes zero → recommend the higher-lift arm (Clear winner).
+3. Both arms profit $> 0$ AND the Mens − Womens CI straddles zero → recommend "Either email, no clear winner".
+4. Otherwise pick the higher-profit arm; label "Strong send" if its spend-lift CI excludes zero, else "Tentative send, evidence uncertain".
+
+Display as a per-bin lollipop chart with both arms, 95% CIs, a \$0.01 cost reference line, and the recommendation appended to each y-axis label so the figure reads like a decision table. Two alternate presentations are also produced: (a) verdict-titled faceted bars (panel titles read "Warm: Send Mens", etc.) and (b) incremental-profit bars colored green/red by profitability sign.
+
+*Why:* Estimates alone don't answer the managerial question. The retailer cares whether to email Warm customers with the Mens campaign, suppress emails to Very dormant customers, or send either. Translating per-bin lifts from Analysis 1 into an explicit campaign-assignment rule under a \$0.01 send cost is the direct managerial deliverable. The tiered language ("Clear winner" vs. "Strong send" vs. "Tentative send" vs. "Either email") communicates uncertainty without overstating it.
+
+3. **Robustness checks.**
+
+*Check 1: Cell sizes.* Use the per-(recency_bin × segment) counts from Table 2 and the cell-counts figure (Item 6 in Section 2). Flag any cell with $n < 500$ and report the boolean in the results summary.
+
+*Concern:* Per-bin estimates rely on within-cell variance, and `spend` is heavily right-skewed. Tiny cells produce wide CIs and unstable point estimates, especially in the upper tail. With $n \geq 500$ in every cell, the per-bin SE on spend is small enough that the rank ordering of bins should be stable; below that, we would have to qualify the result.
+
+*Check 2: Winsorized spend.* Re-run Analysis 1 using `spend_w99` (raw `spend` winsorized at the 99th percentile of the full sample). Save results and visualize as a side-by-side raw-vs-winsorized forest plot in the same panel layout as Figure 1.
+
+*Concern:* A handful of large spenders may drive the per-bin lifts. If the winsorized estimates have the same direction and rough ranking as the raw estimates, the headline is not an outlier story. If a result vanishes after winsorizing, the raw lift is driven by a few large purchases and the targeting recommendation for that bin needs to be qualified accordingly.
+
+*Check 3: Covariate balance.* For each pre-treatment covariate (`recency`, `history`, `mens`, `womens`, `newbie`, `zip_code`, `channel`), compute per-arm means (continuous/binary) or per-arm shares (categorical) with 95% CIs. Flag standardized mean differences $|\mathrm{SMD}| > 0.10$ for numeric/binary covariates and share differences $> 2$ percentage points for categorical levels. Visualize as a multi-panel figure (one panel per covariate or per categorical level), three colored points with CIs per panel; overlapping CIs across the three arms is the signal that randomization worked.
+
+*Concern:* If any covariate is systematically imbalanced — non-overlapping CIs across arms — the random assignment may have been implemented incorrectly, which would undermine the causal interpretation of every estimate above. With $n = 64{,}000$ the standard errors are tight, so even small genuine imbalances become detectable; passing this check is a non-trivial confirmation that the randomization held.

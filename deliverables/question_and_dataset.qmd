@@ -1,0 +1,67 @@
+---
+title: "Question and Dataset"
+format: pdf
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+library(tidyverse)
+library(gt)
+
+# Load data
+data <- read_csv('../data/hillstrom_data.csv')
+```
+
+
+1. **Organization**: An e-commerce retailer evaluating the effectiveness of its email marketing
+campaigns.
+
+
+2. **Research question/classification**: Does the causal effect of email marketing on revenue depend on how recently a customer last purchased, and what does this imply about how retailers should allocate promotional campaigns? This is a causal question using an A/B test (randomized controlled trial).
+
+
+3. **Dataset**: The [Hillstrom Email Marketing Experiment](https://blog.minethatdata.com/2008/03/minethatdata-e-mail-analytics-and-data.html), containing 64,000 observations. Each row is a customer. Details about key fields are in the table below.
+
+
+```{r}
+#| echo: false
+tibble(
+  Field = c(
+    "`recency`", "`history`", "`history_segment`",
+    "`mens`", "`womens`", "`zip_code`",
+    "`newbie`", "`channel`", "`segment`",
+    "`visit`", "`conversion`", "`spend`"
+  ),
+  Description = c(
+    "Months since last purchase",
+    "Dollar value of past purchases",
+    "Binned dollar value of past purchases e.g. $100 - $200",
+    "1 if customer purchased men's merchandise in the past",
+    "1 if customer purchased women's merchandise in the past",
+    "Urban, suburban, or rural",
+    "1 if new customer in the past 12 months",
+    "Purchase channel: phone, web, or multichannel",
+    "Treatment group: Mens E-Mail, Womens E-Mail, or No E-Mail",
+    "1 if the customer visited the website in the following 2 weeks",
+    "1 if the customer made a purchase",
+    "Dollar amount spent"
+  )
+) |>
+  gt() |>
+  fmt_markdown(columns = Field)
+```
+
+
+4. **Key components**: Method is A/B test. The treatment is receiving an email campaign (men’s or women’s merchandise). The control group received no email. 64,000 customers were randomly assigned to three equally sized groups. The outcomes are website visits, conversions, and spending over the 2 weeks following the campaign. Because assignment was random, any difference in outcomes between groups is attributable to the email.
+
+
+
+
+
+
+
+
+
+

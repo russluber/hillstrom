@@ -1,0 +1,13 @@
+# PDFs — rendered Quarto output, kept out of the repo (live in Dropbox instead)
+*.pdf
+
+# Claude Code local settings
+.claude/
+
+# Quarto / R build artifacts
+*_files/
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+/.quarto/
