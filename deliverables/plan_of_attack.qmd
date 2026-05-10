@@ -1,6 +1,13 @@
-﻿---
+---
 title: "Plan of Attack"
 format: pdf
+header-includes:
+  - \setkomafont{disposition}{\rmfamily\bfseries}
+  - \setkomafont{title}{\rmfamily\bfseries}
+  - \setkomafont{section}{\rmfamily\bfseries}
+  - \setkomafont{subsection}{\rmfamily\bfseries}
+  - \setkomafont{subsubsection}{\rmfamily\bfseries}
+  - \setkomafont{paragraph}{\rmfamily\bfseries}
 ---
 
 ```{r}
@@ -9,6 +16,8 @@ format: pdf
 #| warning: false
 library(tidyverse)
 library(gt)
+library(patchwork)
+library(ggh4x)
 
 # Load data
 data <- read_csv('../data/hillstrom_data.csv')
@@ -19,12 +28,12 @@ data <- read_csv('../data/hillstrom_data.csv')
 
 Email campaigns are not free — there is a cost to sending, and not every customer responds. A natural hypothesis is that a customer who purchased two months ago is easier to re-engage than one who has not purchased in nearly a year. If email effectiveness varies systematically with recency, a retailer can do better than blasting the same campaign to everyone: it can concentrate sends where the incremental return is highest and suppress sends where the lift does not cover the cost.
 
-This motivates a more specific operational question: for each recency based customer group (Warm, Cooling, Dormant, Very dormant), should the retailer send the Mens E-Mail campaign, the Womens E-Mail campaign, or no email, in order to maximize incremental profit at an assumed $0.01 per email send cost?
+This motivates a sharper operational question: for each recency group (Warm, Cooling, Dormant, Very dormant), should the retailer send Mens E-Mail, Womens E-Mail, or no email at an assumed $0.01 per send cost?
 
 
-## Section 1: Raw Daw Description
+## Section 1: Raw Data Description
 
-The Hillstrom Email Marketing Experiment dataset contains 64,000 observations. Each observation is uniquely identified by a customer (each row is one customer; no duplicates). Each row represents a single customer, with pre-experiment attributes and post-experiment outcomes. The data covers a single two-week post-campaign window. Key fields are:
+The Hillstrom Email Marketing Experiment dataset contains 64,000 observations and 12 variables. Each row is one customer with pre-experiment attributes and post-experiment outcomes covering a single two-week post-campaign window. Key fields are:
 
 ```{r}
 #| echo: false
@@ -54,16 +63,34 @@ tibble(
   fmt_markdown(columns = Field)
 ```
 
-The data covers 64,000 customers randomly assigned in equal thirds to the three groups (approximately 21,333 per arm). Our dependent variables are `visit`, `conversion`, and `spend`. Our key independent variable is `segment` (treatment group). Pre-experiment covariates (`history`, `history_segment`, `recency`, `mens`, `womens`, `zip_code`, `newbie`, `channel`) are available for heterogeneous-effect exploration.
+**Unit counts.** Customers are split nearly evenly across the three randomized arms: 21,307 Mens E-Mail, 21,306 No E-Mail (control), and 21,387 Womens E-Mail. Categorical covariates: `zip_code` (Rural 9,563 / Suburban 28,776 / Urban 25,661), `channel` (Multichannel 7,762 / Phone 28,021 / Web 28,217), `history_segment` (7 binned dollar levels). `recency` is integer 1–12 with no out-of-range values.
 
-Summary statistics for the key variables are in the table below. The three dependent variables are: `visit`, `conversion`, and `spend`. The treatment variable (indicator) is `segment`. The remaining fields are pre-treatment covariates used for balance checks and
-heterogeneous-effects analysis.
+Summary statistics for the key variables are in the table below.
 
 
 ```{r}
 #| echo: false
 #| message: false
 #| warning: false
+
+var_order <- c(
+  "visit (0/1)", "conversion (0/1)", "spend ($)",
+  "Mens E-Mail (0/1)", "Womens E-Mail (0/1)", "No E-Mail (0/1)",
+  "history ($)", "recency (months)", "mens (0/1)", "womens (0/1)", "newbie (0/1)"
+)
+category_lookup <- c(
+  "visit (0/1)" = "Dependent variables",
+  "conversion (0/1)" = "Dependent variables",
+  "spend ($)" = "Dependent variables",
+  "Mens E-Mail (0/1)" = "Treatment (segment)",
+  "Womens E-Mail (0/1)" = "Treatment (segment)",
+  "No E-Mail (0/1)" = "Treatment (segment)",
+  "history ($)" = "Pre-treatment covariates",
+  "recency (months)" = "Pre-treatment covariates",
+  "mens (0/1)" = "Pre-treatment covariates",
+  "womens (0/1)" = "Pre-treatment covariates",
+  "newbie (0/1)" = "Pre-treatment covariates"
+)
 
 summary_table <- data %>%
   mutate(
@@ -99,38 +126,96 @@ summary_table <- data %>%
     .groups = "drop"
   ) %>%
   mutate(
-    across(
-      c(Mean, SD, Min, Median, Max),
-      ~ round(.x, 3)
-    )
-  )
+    Category = factor(
+      category_lookup[Variable],
+      levels = c("Dependent variables", "Treatment (segment)", "Pre-treatment covariates")
+    ),
+    Variable = factor(Variable, levels = var_order),
+    across(c(Mean, SD, Min, Median, Max), ~ round(.x, 3))
+  ) %>%
+  arrange(Category, Variable)
 
 summary_table |>
-  gt(rowname_col = "Variable") |>
-  tab_caption("Summary statistics, full sample (64,000 customers)") |>
-  tab_row_group(label = "Dependent variables",      rows = 1:3) |>
-  tab_row_group(label = "Treatment (segment)",      rows = 4:6) |>
-  tab_row_group(label = "Pre-treatment covariates", rows = 7:11)
+  gt(rowname_col = "Variable", groupname_col = "Category") |>
+  tab_caption("Summary statistics, full sample (64,000 customers).")
 ```
 
 
-**Contingencies.** Because `spend` is heavily right-skewed (a small share of customers drive most of the revenue), every spend-based estimate is reported in two forms: (1) the raw mean difference between arms, which is the headline, and (2) the same difference with `spend` winsorized at the 99th percentile of the full sample, which is the outlier-sensitivity check. Binary `visit` and `conversion` require no outlier handling.
+**Distribution of dependent variables.** `spend` is dominated by zeros: only 578 of the 64,000 customers (0.9%) made a purchase in the two-week window. Among those positive spenders, mean spend is $116, median is $81, and the maximum is $499. The 99.1% zero-mass is the central feature of the headline outcome — every analysis on `spend` is essentially comparing the *frequency and size of conversions* across arms, not differences in a continuous purchase variable. The histogram below shows the positive-spend distribution; the binary outcomes are summarized in the proportion table that follows.
+
+```{r}
+#| echo: false
+#| fig-width: 6.5
+#| fig-height: 3
+#| fig-cap: "Distribution of `spend` among the 578 positive spenders. The remaining 99.1% of customers (n = 63,422) have `spend = $0` and are not shown. Dashed lines mark the 95th and 99th percentiles of positive spenders."
+
+pos_spend <- data |> filter(spend > 0)
+p95 <- quantile(pos_spend$spend, 0.95)
+p99 <- quantile(pos_spend$spend, 0.99)
+
+ggplot(pos_spend, aes(x = spend)) +
+  geom_histogram(bins = 30, fill = "#4477AA", color = "white") +
+  geom_vline(xintercept = p95, linetype = "dashed", color = "#AA3377") +
+  geom_vline(xintercept = p99, linetype = "dashed", color = "#AA3377") +
+  annotate("text", x = p95, y = Inf, label = sprintf("p95 = $%.0f", p95),
+           vjust = 1.5, hjust = -0.1, size = 3, color = "#AA3377") +
+  annotate("text", x = p99, y = Inf, label = sprintf("p99 = $%.0f", p99),
+           vjust = 3, hjust = 1.1, size = 3, color = "#AA3377") +
+  labs(x = "Spend ($) — among positive spenders only", y = "Customers") +
+  theme_minimal(base_size = 10)
+```
+
+```{r}
+#| echo: false
+
+tibble(
+  Variable = c("`visit`", "`conversion`"),
+  `n (= 0)` = c(sum(data$visit == 0), sum(data$conversion == 0)),
+  `n (= 1)` = c(sum(data$visit == 1), sum(data$conversion == 1)),
+  `% (= 1)` = c(
+    scales::percent(mean(data$visit == 1), accuracy = 0.01),
+    scales::percent(mean(data$conversion == 1), accuracy = 0.01)
+  )
+) |>
+  gt() |>
+  tab_caption("Class proportions for binary dependent variables.") |>
+  fmt_markdown(columns = Variable) |>
+  fmt_number(columns = c(`n (= 0)`, `n (= 1)`), decimals = 0)
+```
+
+**Data quality.** No missing values; `recency` is fully within the documented 1–12 range. 6,562 rows are exact duplicates on all 12 columns — these are non-converting customers with identical low-cardinality profiles, not ID violations, and don't affect the analysis. The audit table below summarizes missingness, cardinality, and storage type for every variable.
+
+```{r}
+#| echo: false
+
+tibble(
+  Variable = paste0("`", names(data), "`"),
+  Missing  = purrr::map_int(data, ~ sum(is.na(.x))),
+  `Unique values` = purrr::map_int(data, dplyr::n_distinct),
+  Type     = purrr::map_chr(data, ~ class(.x)[1])
+) |>
+  gt() |>
+  tab_caption("Per-variable data-quality audit.") |>
+  fmt_markdown(columns = Variable)
+```
+
+**Contingencies.** Because `spend` is overwhelmingly zero with a thin positive tail, the standard "winsorize at the 99th percentile of the full sample" approach is degenerate here: the full-sample 99th percentile is exactly $0, which would erase every positive spender and turn the headline into zero. The natural fallback — p99 of *positive* spenders only — is also degenerate: it coincides with the source top-code at $499 (the maximum spend in the data), so capping at p99 leaves every observation unchanged and the robustness check answers a tautology. We therefore winsorize *within positive spenders* at the 95th percentile (cap $362) for the outlier-sensitivity check, which actually caps the top ~5% of positive spenders (~29 customers); this preserves comparability across arms because the cap is defined on the pooled positive-spender distribution, not per arm or per bin. Binary `visit` and `conversion` require no outlier handling.
 
 ## Section 2: Sample Construction Plan
 
 1. **Sample window.** The experiment ran at a single point in time, so there is no sample-window decision. Use all 64,000 observations. *Why:* The dataset itself is the entire experiment; there is no sub-period to carve out.
 
-2. **Sample restrictions.** No observations will be dropped for the main intent-to-treat analysis. *Why:* Dropping observations post-randomization breaks the random-assignment guarantee and biases the estimate — one of the most common mistakes in applied A/B testing. In particular, do not drop non-visitors, non-converters, or zero-spend customers; the headline statistic is mean spend per *assigned* customer, including zeros. The only acceptable exclusion is a missing required analysis variable. Observations with `recency` outside 1–12 are flagged via `recency_out_of_range` but retained, and dropped only from the per-bin analyses where they cannot be assigned to a recency bin.
+2. **Sample restrictions.** No observations will be dropped for the main intent-to-treat analysis. *Why:* Dropping observations post-randomization biases the estimate. The only acceptable exclusion is per-bin: observations with `recency` outside 1–12 cannot be assigned to a `recency_bin` and are dropped from per-bin analyses. In this dataset that filter removes 0 rows, so the headline and per-bin samples coincide.
 
 3. **Dependent variable integrity.**
-- `visit` and `conversion`: Binary; verify coding is $\{0, 1\}$ with no missing values.
-- `spend`: Continuous and right-skewed. For the headline estimate, use the raw mean difference between arms. For sensitivity, winsorize at the 99th percentile of the full sample (not by arm or by bin) and report the mean difference again.
+- `visit` and `conversion`: Binary; coding verified as $\{0, 1\}$ with no missing values (see the per-variable audit in Section 1).
+- `spend`: Continuous, with a 99.1% zero-mass and a thin positive tail running up to \$499. For the headline estimate, use the raw mean difference between arms. For sensitivity, construct `spend_w95` by capping `spend` at the 95th percentile of positive spenders (\$362) and report the mean difference again.
 
-*Why:* A few large spenders can move the raw mean substantially. The winsorized version shows whether the headline is driven by those outliers or by the bulk of customers. Winsorizing at the full-sample percentile (rather than per arm or per bin) preserves the comparability of the arms; cutting tails differently within each group would itself bias the comparison.
+*Why:* A handful of large purchases can move the raw mean. The winsorized version probes whether the headline is driven by those outliers or by the bulk of customers. The choice of cutoff is justified in Section 1, Contingencies.
 
-4. **Treatment indicators.** `segment` is already clean and has three randomized arms: `No E-Mail` (control), `Mens E-Mail`, and `Womens E-Mail`. Construct two binary indicators alongside the raw factor: `mens_email = 1` if `segment == "Mens E-Mail"` and `womens_email = 1` if `segment == "Womens E-Mail"`. The control arm `No E-Mail` is the implicit reference category.
+4. **Treatment indicators.** `segment` has three randomized arms: `No E-Mail` (control), `Mens E-Mail`, and `Womens E-Mail`. Construct dummies `mens_email` and `womens_email`; `No E-Mail` is the reference.
 
-*Why:* The three-arm design lets us estimate three pairwise comparisons of interest — Mens − No E-Mail, Womens − No E-Mail, and Mens − Womens. Collapsing the two email arms into a single "any email" specification would hide whether the two campaigns differ, which is itself part of the targeting question.
+*Why:* The three-arm design lets us estimate Mens − Control, Womens − Control, and Mens − Womens directly. Collapsing the email arms into a single "any email" indicator would hide whether the two campaigns differ — itself part of the targeting question.
 
 5. **Recency bin construction.** Bin `recency` into four ordered groups using pre-specified 3-month lifecycle windows:
 
@@ -143,61 +228,489 @@ summary_table |>
 
 Treat `recency_bin` as an ordered factor with the levels in that order. Bins are defined *before* looking at any treatment effects.
 
-*Why:* Pre-specified, business-interpretable bins make recency the central segmentation variable without letting the cutoffs be tuned to the result. Three-month windows are coarse enough to give every (bin × arm) cell a comfortably large sample and fine enough to separate genuinely different lifecycle states. The 4 × 3 = 12 main cells balance subgroup resolution against statistical credibility (see Item 6).
+*Why:* Pre-specified, business-interpretable bins make recency the central segmentation variable without letting the cutoffs be tuned to the result. Three-month windows are coarse enough to give every (bin × arm) cell a comfortably large sample and fine enough to separate genuinely different lifecycle states. The 4 × 3 = 12 main cells balance subgroup resolution against statistical credibility (see Item 9).
 
-6. **Cell counts (Table 2).** Compute per-(recency_bin × segment) cell sizes and write them to `tables/table2_recency_arm_counts.csv`. Visualize as a grouped bar chart with a horizontal reference line at $n = 500$. Flag any cell that falls below the threshold.
+6. **Aggregation.** Not applicable. The raw data is already at the customer level, which is the unit of randomization and the unit of analysis. No collapsing or roll-up is needed.
 
-*Why:* Subgroup treatment effects are only as credible as the cell sizes that produce them. With $n = 64{,}000$ split across 12 cells and a heavily right-skewed outcome, we want each cell to contain enough observations that the per-cell SE is small. $n = 500$ is the practical lower bound below which we would caveat the result.
+7. **Data merging.** Not applicable. The analysis uses a single source — the customer-level Hillstrom file — with no auxiliary tables to join.
+
+8. **Filters and transformations.** No filters drop observations from the headline analysis. The per-bin filter (recency outside 1–12) drops 0 rows in this dataset. Transformations: (i) `mens_email`, `womens_email` dummies; (ii) `recency_bin` ordered factor; (iii) `spend_w95` (cap at p95 of positive spenders, \$362). `history` is used for covariate balance and heterogeneity context; `history_segment` is a redundant alias and not used.
+
+9. **Cell counts (Table 2).** Compute per-(recency_bin × segment) cell sizes and write them to `tables/table2_recency_arm_counts.csv`. Visualize as a grouped bar chart with a horizontal reference line at $n = 500$. Flag any cell that falls below the threshold.
+
+*Why:* Subgroup estimates are only as credible as the cells that produce them, and `spend` is heavily right-skewed. We set n = 500 per cell as a threshold — this implies an MDE of about \$2.66/customer at full-sample spend SD = \$15.04 (per-bin MDE will vary with within-bin spread; we report actual per-bin SEs alongside @fig-recency). Cells below 500 would produce CIs too wide to support a send/suppress recommendation; we flag and qualify them.
+
+```{r}
+#| echo: false
+#| fig-width: 6.5
+#| fig-height: 2.8
+#| fig-cap: "Cell counts (computed from actual data). Customers per (recency bin × arm) cell, with a horizontal reference line at $n = 500$. All 12 cells are well above the threshold; the Warm bin (recency 1–3) is roughly 60% larger than the other bins because the recency distribution is concentrated at recent values."
+
+cell_counts <- tibble::tribble(
+  ~bin,           ~arm,             ~n,
+  "Warm",         "Mens E-Mail",   7469,
+  "Warm",         "No E-Mail",     7438,
+  "Warm",         "Womens E-Mail", 7486,
+  "Cooling",      "Mens E-Mail",   4673,
+  "Cooling",      "No E-Mail",     4766,
+  "Cooling",      "Womens E-Mail", 4753,
+  "Dormant",      "Mens E-Mail",   4688,
+  "Dormant",      "No E-Mail",     4699,
+  "Dormant",      "Womens E-Mail", 4627,
+  "Very dormant", "Mens E-Mail",   4477,
+  "Very dormant", "No E-Mail",     4403,
+  "Very dormant", "Womens E-Mail", 4521
+) |>
+  mutate(
+    bin = factor(bin, levels = c("Warm", "Cooling", "Dormant", "Very dormant")),
+    arm = factor(arm, levels = c("No E-Mail", "Mens E-Mail", "Womens E-Mail"))
+  )
+
+ggplot(cell_counts, aes(x = bin, y = n, fill = arm)) +
+  geom_col(position = position_dodge(width = 0.85), width = 0.75) +
+  geom_hline(yintercept = 500, linetype = "dashed", color = "grey40") +
+  annotate("text", x = 0.6, y = 800, label = "n = 500 threshold",
+           size = 2.8, color = "grey40", hjust = 0) +
+  scale_fill_manual(
+    values = c("No E-Mail" = "grey60",
+               "Mens E-Mail" = "#7B83C2",
+               "Womens E-Mail" = "#E89BAB")
+  ) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) +
+  labs(x = NULL, y = "Customers in cell", fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        panel.grid.major.x = element_blank())
+```
 
 ## Section 3: Analysis Plan
 
-1. **Research design.** Our question is causal: does email marketing increase incremental revenue more for some recency groups than others, and what does that imply for targeting? Because customers were randomly assigned to the three arms, the arms are comparable on average — any post-treatment difference in outcomes is, in expectation, caused by the treatment. Recency is measured *before* the experiment, so estimating treatment effects within each recency bin uses no post-treatment information and preserves the randomized comparison. We verify that randomization was implemented correctly through a pre-treatment covariate balance test (Robustness Check 3).
+1. **Research design.** Our question is causal: does email marketing increase incremental revenue more for some recency groups than others, and what does that imply for targeting? Because customers were randomly assigned to the three arms, the arms are comparable on average — any post-treatment difference in outcomes is, in expectation, caused by the treatment. Recency is measured *before* the experiment, so estimating treatment effects within each recency bin uses no post-treatment information and preserves the randomized comparison.
+
+We choose `recency` rather than `history` (dollar value of past purchases) as the heterogeneity dimension because lifecycle stage is a more actionable lever for *campaign timing*: the operational question is "when, and to whom, should we send the next email?" — not "which dollar tier should we keep?". `history` is a wallet-size signal, useful for valuing a customer; `recency` is a freshness signal, directly tied to whether an email is well-timed. We retain `history` as a covariate for balance and as a robustness slice, but the headline targeting rule is built on recency.
+
+We verify that randomization was implemented correctly through a pre-treatment covariate balance test (Robustness Check 3).
 
 2. **Key analyses.**
 
-*A note on confidence intervals.* Because this is a randomized experiment, 95% confidence intervals on every treatment-effect estimate are computed cleanly using the two-sample SE,
+*A note on confidence intervals.* Every estimate in this section is reported with a 95% CI. The Mens − Womens contrast uses only the two email arms' variances (the control isn't part of that contrast).
 
-$$\operatorname{SE} = \sqrt{\frac{\mathrm{var}(Y_t)}{n_t} + \frac{\mathrm{var}(Y_c)}{n_c}}, \qquad \mathrm{CI} = \hat{\tau} \pm 1.96 \cdot SE.$$
+*A note on multiple comparisons.* Analysis 1 (12 estimates) and Analysis 2 (24 estimates) together produce ~36 estimates with unadjusted 95% CIs; ~2 false positives are expected under the global null. We lean on cross-bin patterns (monotone gradients, sign-consistent contrasts) and the winsorized re-estimate's robustness rather than treating any single cell's CI exclusion as a hypothesis test.
 
-Every estimate in this section — bars in Figure 0, points in Figures 1 and 2, and the per-arm lifts in Figure 3 — is reported with its 95% CI.
+*Baseline (@fig-overall): Overall email lift on spend.* Two-point forest plot showing the spend lift over control for each email arm — Mens − No E-Mail and Womens − No E-Mail — with 95% CIs. Vertical reference line at zero. Per-point dollar label so the magnitudes are readable directly.
 
-*Baseline (Figure 0): Overall email effects on spend.* Three bars (No E-Mail, Mens E-Mail, Womens E-Mail) showing mean spend per customer with 95% CIs. Horizontal dashed line at the No E-Mail mean. Annotate each treatment bar with the dollar lift and percentage lift over control.
+*Why:* Before drilling down into recency heterogeneity, we need the unconditional headline: do emails move spend on average, and by how much? If the pooled lift is essentially zero, the recency story is moot.
 
-*Why:* Before drilling down into recency heterogeneity, we need the unconditional headline: do emails move spend on average? If the average effect is essentially zero, the recency story is moot. The baseline also acts as the comparison anchor for the per-bin estimates in Analysis 1 — we want to know whether per-bin lifts deviate substantially from the average.
+```{r}
+#| label: fig-overall
+#| echo: false
+#| fig-width: 5.5
+#| fig-height: 2.5
+#| fig-cap: "Illustrative (hypothetical numbers). Pooled spend lift over control for each email arm, with 95% CIs. Dashed vertical line = zero (no effect). Real estimates will replace these mock values."
 
-*Analysis 1 (Figure 1): Spend lift by recency bin.* Forest plot, faceted by comparison (Mens − No E-Mail, Womens − No E-Mail, Mens − Womens). Rows = recency bins, ordered Warm at the top → Very dormant at the bottom. Each row shows a point estimate plus 95% CI on the dollar spend lift. Vertical reference line at zero. Per-point dollar label so the magnitude is readable without parsing the x-axis. As an alternate presentation, also produce a faceted-bar version (mean spend by arm faceted by recency bin, fixed y-scale across panels so cross-bin contrasts are honest).
+fig0_mock <- tibble(
+  comparison = factor(
+    c("Mens − No E-Mail", "Womens − No E-Mail"),
+    levels = c("Womens − No E-Mail", "Mens − No E-Mail")
+  ),
+  lift = c(0.75, 0.45),
+  ci_lo = c(0.46, 0.16),
+  ci_hi = c(1.04, 0.74)
+)
 
-*Why:* This is the main figure. It directly answers whether email is most valuable for Warm, Cooling, Dormant, or Very dormant customers and whether one campaign clearly dominates within each bin. If lifts are flat across recency, recency-based targeting offers nothing over a uniform send policy. If they are differential, the bin-level pattern *is* the targeting opportunity, and the third panel (Mens − Womens) tells us which campaign to pick when they disagree.
+ggplot(fig0_mock, aes(x = lift, y = comparison, color = comparison)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey55") +
+  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi), size = 0.45) +
+  geom_text(aes(label = sprintf("+$%.2f", lift)),
+            vjust = -0.9, size = 3.2, color = "grey20") +
+  scale_color_manual(
+    values = c("Mens − No E-Mail" = "#7B83C2",
+               "Womens − No E-Mail" = "#E89BAB"),
+    guide = "none"
+  ) +
+  labs(x = "Spend lift ($/customer)", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.major.y = element_blank())
+```
 
-*Analysis 2 (Figure 2): Causal funnel decomposition by recency bin.* Three-panel faceted forest plot — Panel 1: visit lift (percentage points), Panel 2: conversion lift (percentage points), Panel 3: spend lift (\$/customer). Within each panel, rows = recency bins with two dodged points per row (Mens − No E-Mail, Womens − No E-Mail). Free x-scales per panel because units differ across panels. Crucially, all three outcomes are estimated intent-to-treat: not conditional on having visited or having purchased.
+*Analysis 1 (@fig-recency): Spend lift by recency bin and targeting verdict.* Single-panel forest plot. Rows = recency bins (Warm at top → Very dormant at bottom), with each row's targeting verdict appended to the y-axis label so the figure reads like a decision table. Within each row, two dodged colored points show the spend lift over control: Mens E-Mail (purple) and Womens E-Mail (pink), each with a 95% CI. Two vertical reference lines mark zero (no effect) and \$0.01 (the assumed send cost). Anything to the right of \$0.01 is profitable at the assumed cost. The verdict on each row comes from applying the decision rules in Analysis 3 below — @fig-recency is the visual layer of that same logic, so the analytical and operational answers are read off the same chart.
 
-*Why:* If a campaign moves spend, we want to know *how*. Three patterns are interpretable: (1) email raises visit but not conversion or spend → the campaign creates traffic without revenue; (2) email raises visit and conversion → reactivation is working as intended; (3) email raises spend without raising visit or conversion → existing visitors are buying more on the same trip. The decomposition diagnoses which lever the campaign is pulling per recency bin and tells marketing where to focus follow-up work. We keep all three outcomes ITT because conditioning on visit or purchase breaks the randomized comparison: treatment may itself change who becomes a visitor, so the conditional sample is no longer comparable across arms.
+*Why:* This is the main figure — it answers the research question and the operational question in one view. The y-axis order shows the recency gradient (does email lift fall with recency?). The two arms within each row show which campaign is bigger (does Mens or Womens dominate?). The cost line shows whether either arm clears the break-even threshold. The verdict in the y-axis label is the resulting recommendation per bin. If lifts are flat across recency, recency-based targeting offers nothing over a uniform send policy. If they are differential, the bin-level pattern *is* the targeting opportunity.
 
-*Analysis 3 (Figure 3): Targeting policy recommendation.* For each recency bin, compute incremental profit per arm,
+```{r}
+#| label: fig-recency
+#| echo: false
+#| fig-width: 6.5
+#| fig-height: 3.2
+#| fig-cap: "Illustrative (hypothetical numbers). Spend lift in dollars per customer, by recency bin (rows) and email arm (dodged points within row). Dots = point estimate; horizontal bars = 95% CI. Dashed vertical lines mark zero effect and the \\$0.01 assumed send cost. Each row's targeting verdict — derived from the decision rules in Analysis 3 — is appended to the y-axis label. Pattern shown is monotone decline of email lift with recency, with Mens dominating Womens in the Warm bin and the recommendation degrading from Send-Mens to Either-email to Suppress as recency increases. Real estimates will replace these mock values."
 
-$$\mathrm{profit}_a = \hat{\tau}_a - \$0.01,$$
+fig1_mock <- tibble::tribble(
+  ~bin,           ~arm,    ~est,  ~lo,    ~hi,    ~verdict,
+  "Warm",         "Mens",   1.45,  1.05,  1.85,   "Send Mens",
+  "Warm",         "Womens", 0.75,  0.40,  1.10,   "Send Mens",
+  "Cooling",      "Mens",   0.85,  0.50,  1.20,   "Either email",
+  "Cooling",      "Womens", 0.55,  0.20,  0.90,   "Either email",
+  "Dormant",      "Mens",   0.30,  0.05,  0.55,   "Either email",
+  "Dormant",      "Womens", 0.20, -0.05,  0.45,   "Either email",
+  "Very dormant", "Mens",  -0.05, -0.35,  0.25,   "Suppress",
+  "Very dormant", "Womens",-0.10, -0.40,  0.20,   "Suppress"
+) |>
+  mutate(
+    bin = factor(bin, levels = c("Warm", "Cooling", "Dormant", "Very dormant")),
+    arm = factor(arm, levels = c("Mens", "Womens")),
+    bin_label = factor(
+      paste0(bin, "  —  ", verdict),
+      levels = unique(paste0(bin, "  —  ", verdict))
+    )
+  )
 
-where $\hat{\tau}_a$ is the per-customer spend lift for arm $a \in \{\text{Mens}, \text{Womens}\}$ and \$0.01 is the assumed per-email send cost. Apply the following decision rules in order:
+ggplot(fig1_mock, aes(x = est, y = fct_rev(bin_label), color = arm)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey55") +
+  geom_vline(xintercept = 0.01, linetype = "dotted", color = "grey40") +
+  geom_pointrange(aes(xmin = lo, xmax = hi),
+                  position = position_dodge(width = 0.5), size = 0.4) +
+  scale_color_manual(values = c("Mens" = "#7B83C2", "Womens" = "#E89BAB")) +
+  labs(x = "Spend lift ($/customer)  —  dotted line at $0.01 = assumed send cost",
+       y = NULL, color = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom", panel.grid.major.y = element_blank())
+```
 
-1. Both arms have profit $\leq 0$ → recommend `No E-Mail` (Suppress).
-2. Both arms profit $> 0$ AND the Mens − Womens 95% CI excludes zero → recommend the higher-lift arm (Clear winner).
-3. Both arms profit $> 0$ AND the Mens − Womens CI straddles zero → recommend "Either email, no clear winner".
-4. Otherwise pick the higher-profit arm; label "Strong send" if its spend-lift CI excludes zero, else "Tentative send, evidence uncertain".
+```{r}
+#| echo: false
+#| tbl-pos: "H"
 
-Display as a per-bin lollipop chart with both arms, 95% CIs, a \$0.01 cost reference line, and the recommendation appended to each y-axis label so the figure reads like a decision table. Two alternate presentations are also produced: (a) verdict-titled faceted bars (panel titles read "Warm: Send Mens", etc.) and (b) incremental-profit bars colored green/red by profitability sign.
+fig1_table <- tibble::tribble(
+  ~bin,            ~mens_est, ~mens_lo, ~mens_hi, ~womens_est, ~womens_lo, ~womens_hi, ~mw_est, ~mw_lo, ~mw_hi, ~verdict,
+  "Warm",            1.45,    1.05,   1.85,    0.75,   0.40,    1.10,    0.70,   0.15,   1.25, "Send Mens",
+  "Cooling",         0.85,    0.50,   1.20,    0.55,   0.20,    0.90,    0.30,  -0.25,   0.85, "Either email",
+  "Dormant",         0.30,    0.05,   0.55,    0.20,  -0.05,    0.45,    0.10,  -0.45,   0.65, "Either email",
+  "Very dormant",   -0.05,   -0.35,   0.25,   -0.10,  -0.40,    0.20,    0.05,  -0.50,   0.60, "Suppress"
+)
 
-*Why:* Estimates alone don't answer the managerial question. The retailer cares whether to email Warm customers with the Mens campaign, suppress emails to Very dormant customers, or send either. Translating per-bin lifts from Analysis 1 into an explicit campaign-assignment rule under a \$0.01 send cost is the direct managerial deliverable. The tiered language ("Clear winner" vs. "Strong send" vs. "Tentative send" vs. "Either email") communicates uncertainty without overstating it.
+# Format a single signed dollar value: $1.45, -$0.05, $0.00
+fmt_dollar <- function(x) {
+  ifelse(x < 0,
+         sprintf("-$%.2f", abs(x)),
+         sprintf("$%.2f", x))
+}
+fmt_ci <- function(est, lo, hi) {
+  sprintf("%s [%s, %s]", fmt_dollar(est), fmt_dollar(lo), fmt_dollar(hi))
+}
+
+fig1_table |>
+  mutate(
+    `Mens lift`     = fmt_ci(mens_est,   mens_lo,   mens_hi),
+    `Womens lift`   = fmt_ci(womens_est, womens_lo, womens_hi),
+    `Mens − Womens` = fmt_ci(mw_est,     mw_lo,     mw_hi)
+  ) |>
+  select(`Recency bin` = bin, `Mens lift`, `Womens lift`, `Mens − Womens`, Verdict = verdict) |>
+  gt() |>
+  tab_caption("Numeric companion to the per-bin spend-lift forest plot (illustrative). Per-bin spend lifts in dollars per customer with 95% CIs, plus the Mens − Womens contrast that drives Decision Rule 2 (and is not shown in the figure).")
+```
+
+*Analysis 2 (@fig-funnel): Causal funnel decomposition by recency bin.* Three-panel forest plot — visit lift (pp), conversion lift (pp), spend lift (\$/customer). Within each panel, rows = recency bins with two dodged points per row (Mens − No E-Mail, Womens − No E-Mail). Visit and conversion panels share an x-axis so funnel attenuation is visible at a glance; spend uses its own dollar scale. The spend panel overlays a grey × at the implied spend lift if email only drove visits (visit lift × control buy-rate × control basket); the gap between the colored point and the × is the share of spend effect coming from somewhere other than extra visits. All three outcomes are estimated intent-to-treat (not conditional on having visited or purchased).
+
+*Why:* If a campaign moves spend, we want to know *how*. Three patterns are interpretable: (1) email raises visit but not conversion or spend → the campaign creates traffic without revenue; (2) email raises visit and conversion → reactivation is working as intended; (3) email raises spend without raising visit or conversion → existing visitors are buying more on the same trip. The decomposition diagnoses which lever the campaign is pulling per recency bin and tells marketing where to focus follow-up work.
+
+This is a deliberate departure from the cookbook recipe of reporting `conversion | visit` and `spend | conversion`. Conditioning on a post-treatment variable (visited, converted) selects a non-random subset of customers — treatment itself changes who visits — so the conditional comparison is biased by selection. The interpretation shifts from "given a visit, do they convert?" (which randomization can't answer cleanly) to "how much does email increase visit, conversion, and spend per customer assigned?" (which it can).
+
+```{r}
+#| label: fig-funnel
+#| echo: false
+#| fig-width: 7.5
+#| fig-height: 3.6
+#| fig-cap: "Illustrative (hypothetical numbers). Three-panel ITT funnel decomposition. Rows = recency bin; dodged dots within each row = Mens (purple) and Womens (pink); dashed vertical line = zero. Visit and conversion panels share an x-axis range so the funnel attenuation is visible at a glance. The grey × in the spend panel marks the visit-only implied spend lift (visit lift × control buy-rate × control basket); the gap between the colored dot and the grey × is the share of spend lift not explained by extra visits alone. Real estimates will replace these mock values."
+
+fig2_mock <- tibble::tribble(
+  ~bin,           ~outcome,          ~arm,     ~est,   ~lo,   ~hi,
+  "Warm",         "Visit (pp)",       "Mens",   8.5,   7.0,  10.0,
+  "Warm",         "Visit (pp)",       "Womens", 5.5,   4.2,   6.8,
+  "Cooling",      "Visit (pp)",       "Mens",   7.2,   5.6,   8.8,
+  "Cooling",      "Visit (pp)",       "Womens", 4.8,   3.5,   6.1,
+  "Dormant",      "Visit (pp)",       "Mens",   5.5,   3.9,   7.1,
+  "Dormant",      "Visit (pp)",       "Womens", 3.8,   2.4,   5.2,
+  "Very dormant", "Visit (pp)",       "Mens",   3.2,   1.6,   4.8,
+  "Very dormant", "Visit (pp)",       "Womens", 2.0,   0.6,   3.4,
+  "Warm",         "Conversion (pp)",  "Mens",   1.10,  0.75,  1.45,
+  "Warm",         "Conversion (pp)",  "Womens", 0.75,  0.45,  1.05,
+  "Cooling",      "Conversion (pp)",  "Mens",   0.85,  0.55,  1.15,
+  "Cooling",      "Conversion (pp)",  "Womens", 0.55,  0.30,  0.80,
+  "Dormant",      "Conversion (pp)",  "Mens",   0.50,  0.20,  0.80,
+  "Dormant",      "Conversion (pp)",  "Womens", 0.30,  0.05,  0.55,
+  "Very dormant", "Conversion (pp)",  "Mens",   0.20, -0.05,  0.45,
+  "Very dormant", "Conversion (pp)",  "Womens", 0.10, -0.15,  0.35,
+  "Warm",         "Spend ($)",        "Mens",   1.30,  0.85,  1.75,
+  "Warm",         "Spend ($)",        "Womens", 0.95,  0.55,  1.35,
+  "Cooling",      "Spend ($)",        "Mens",   0.85,  0.50,  1.20,
+  "Cooling",      "Spend ($)",        "Womens", 0.55,  0.20,  0.90,
+  "Dormant",      "Spend ($)",        "Mens",   0.45,  0.10,  0.80,
+  "Dormant",      "Spend ($)",        "Womens", 0.30, -0.05,  0.65,
+  "Very dormant", "Spend ($)",        "Mens",   0.10, -0.25,  0.45,
+  "Very dormant", "Spend ($)",        "Womens", 0.05, -0.30,  0.40
+) |>
+  mutate(
+    bin = factor(bin, levels = c("Warm", "Cooling", "Dormant", "Very dormant")),
+    outcome = factor(outcome, levels = c("Visit (pp)", "Conversion (pp)", "Spend ($)")),
+    arm = factor(arm, levels = c("Mens", "Womens"))
+  )
+
+# Implied spend lift if email only drove visits:
+# visit_lift_pp × baseline_buy_rate (~10%) × baseline_basket (~$120) = visit_lift_pp × $0.12
+implied_spend <- fig2_mock |>
+  filter(outcome == "Visit (pp)") |>
+  mutate(implied = est * 0.12) |>
+  select(bin, arm, implied)
+
+pp_lim <- c(min(fig2_mock$lo[fig2_mock$outcome != "Spend ($)"]) - 0.5,
+            max(fig2_mock$hi[fig2_mock$outcome != "Spend ($)"]) + 0.5)
+
+panel_theme <- list(
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey55"),
+  scale_color_manual(values = c("Mens" = "#7B83C2", "Womens" = "#E89BAB")),
+  theme_minimal(base_size = 9),
+  theme(panel.grid.major.y = element_blank())
+)
+
+p_visit <- fig2_mock |>
+  filter(outcome == "Visit (pp)") |>
+  ggplot(aes(x = est, y = fct_rev(bin), color = arm)) +
+  panel_theme +
+  geom_pointrange(aes(xmin = lo, xmax = hi),
+                  position = position_dodge(width = 0.5), size = 0.3) +
+  scale_x_continuous(limits = pp_lim) +
+  labs(x = "Visit lift (pp)", y = NULL, title = "Visit") +
+  theme(legend.position = "none")
+
+p_conv <- fig2_mock |>
+  filter(outcome == "Conversion (pp)") |>
+  ggplot(aes(x = est, y = fct_rev(bin), color = arm)) +
+  panel_theme +
+  geom_pointrange(aes(xmin = lo, xmax = hi),
+                  position = position_dodge(width = 0.5), size = 0.3) +
+  scale_x_continuous(limits = pp_lim) +
+  labs(x = "Conversion lift (pp)", y = NULL, title = "Conversion") +
+  theme(legend.position = "none", axis.text.y = element_blank())
+
+p_spend <- fig2_mock |>
+  filter(outcome == "Spend ($)") |>
+  ggplot(aes(x = est, y = fct_rev(bin), color = arm)) +
+  panel_theme +
+  geom_pointrange(aes(xmin = lo, xmax = hi),
+                  position = position_dodge(width = 0.5), size = 0.3) +
+  geom_point(
+    data = implied_spend,
+    aes(x = implied, y = fct_rev(bin), color = arm),
+    shape = 4, size = 2, stroke = 1,
+    position = position_dodge(width = 0.5),
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  labs(x = "Spend lift ($)", y = NULL, title = "Spend",
+       caption = "× = visit-only implied") +
+  theme(legend.position = "bottom",
+        axis.text.y = element_blank(),
+        plot.caption = element_text(size = 7, color = "grey40", hjust = 0.5))
+
+p_visit + p_conv + p_spend +
+  plot_layout(widths = c(1.1, 1.1, 1)) +
+  plot_annotation(theme = theme(plot.margin = margin()))
+```
+
+*Analysis 3: Targeting policy recommendation.* For each recency bin, compute incremental profit per arm as the per-customer spend lift minus the \$0.01 assumed per-email send cost. Apply the following decision rules in order:
+
+1. **Both arms unprofitable** (both arm profits $\leq 0$) → recommend `No E-Mail` (Suppress).
+2. **Both arms profitable, clear winner** (both profits $> 0$ AND the Mens − Womens 95% CI excludes zero) → recommend the higher-lift arm (Clear winner).
+3. **Both arms profitable, no clear winner** (both profits $> 0$ AND the Mens − Womens CI straddles zero) → recommend "Either email" (no preference).
+4. **Exactly one arm profitable** (one arm's profit $> 0$, the other's $\leq 0$) → recommend the profitable arm; label "Strong send" if that arm's spend-lift CI excludes zero, else "Tentative send, evidence uncertain".
+
+The decision rules are applied per recency bin and the resulting recommendation is shown as the verdict label on each row of @fig-recency above. There is no separate decision-only figure — the lifts and verdicts share one chart so the reader sees the analytical evidence and the operational recommendation in the same view.
+
+*Break-even cost.* Alongside the headline ROI under \$0.01, compute the per-bin per-arm break-even cost — the cost at which the arm exactly breaks even, which equals the estimated per-customer lift. Display as a small companion table (rows = recency bin, columns = Mens/Womens, entries in dollars). Cells where the break-even cost exceeds \$0.01 remain profitable at the assumed cost; cells where it falls between \$0 and \$0.01 flip to "Suppress" if the assumed cost is correct. Flag any cell within ±\$0.005 of \$0.01 as borderline.
+
+For cells where the estimated lift is non-positive, there's no meaningful break-even cost — the campaign is unprofitable at any positive price. Mark those cells "—" (unprofitable at any cost).
+
+The break-even table also includes the customer count per recency bin and the implied total expected profit if the recommended action is taken across all customers in that bin (lift × bin size, minus cost × bin size for "send" verdicts; zero for "suppress"). This translates the per-customer estimates into the budget-relevant total: with limited email capacity, the retailer can rank bins by total expected profit and prioritize accordingly.
+
+```{r}
+#| echo: false
+#| tbl-pos: "H"
+
+breakeven_table <- tibble::tribble(
+  ~bin,            ~mens_cstar, ~womens_cstar, ~bin_n, ~recommended_arm, ~recommended_lift, ~verdict,
+  "Warm",          "$1.45",     "$0.75",      22393,  "Mens",            1.45,             "Send Mens",
+  "Cooling",       "$0.85",     "$0.55",      14192,  "Mens or Womens",  0.85,             "Either email",
+  "Dormant",       "$0.30",     "$0.20",      14014,  "Mens or Womens",  0.30,             "Either email",
+  "Very dormant",  "—",         "—",          13401,  "None",            0.00,             "Suppress"
+)
+
+breakeven_table |>
+  mutate(
+    `Total profit` = if_else(
+      verdict == "Suppress",
+      "$0",
+      sprintf("$%s", scales::comma(round((recommended_lift - 0.01) * bin_n, -1)))
+    )
+  ) |>
+  select(
+    `Recency bin`        = bin,
+    `Mens c*`            = mens_cstar,
+    `Womens c*`          = womens_cstar,
+    `n in bin`           = bin_n,
+    `Verdict`            = verdict,
+    `Total profit`
+  ) |>
+  gt() |>
+  fmt_number(columns = `n in bin`, decimals = 0, sep_mark = ",") |>
+  tab_caption("Break-even cost table augmented with bin sizes and total expected profit (illustrative). c* values use the mock per-customer lifts from the per-bin forest plot; total profit assumes the recommended action is applied to all customers in the bin at the assumed \\$0.01 send cost. Bin sizes come from the actual data. With a fixed email budget, ranking bins by total profit (Warm $\\$32{,}250$ → Cooling $\\$11{,}920$ → Dormant $\\$4{,}060$ → Very dormant suppressed) gives the budget-constrained allocation order.")
+```
+
+*Why:* Translating per-bin lifts into an explicit campaign-assignment rule is the managerial deliverable; the tiered language ("Clear winner", "Strong send", "Tentative send", "Either email") communicates uncertainty without overstating it. The break-even table covers the only economic assumption in the plan — the stipulated \$0.01 send cost — by reframing "is the campaign profitable at \$0.01?" as "at what cost would the recommendation flip?", which tells the retailer how robust the rule is to cost mis-estimation.
 
 3. **Robustness checks.**
 
-*Check 1: Cell sizes.* Use the per-(recency_bin × segment) counts from Table 2 and the cell-counts figure (Item 6 in Section 2). Flag any cell with $n < 500$ and report the boolean in the results summary.
+*Check 1: Cell sizes.* Use the per-(recency_bin × segment) counts from Table 2 and the cell-counts figure (Item 9 in Section 2). Flag any cell with $n < 500$ and report the boolean in the results summary.
 
-*Concern:* Per-bin estimates rely on within-cell variance, and `spend` is heavily right-skewed. Tiny cells produce wide CIs and unstable point estimates, especially in the upper tail. With $n \geq 500$ in every cell, the per-bin SE on spend is small enough that the rank ordering of bins should be stable; below that, we would have to qualify the result.
+*Concern:* `spend` is heavily right-skewed; cells below n = 500 produce CIs too wide to credibly support the per-bin rank ordering.
 
-*Check 2: Winsorized spend.* Re-run Analysis 1 using `spend_w99` (raw `spend` winsorized at the 99th percentile of the full sample). Save results and visualize as a side-by-side raw-vs-winsorized forest plot in the same panel layout as Figure 1.
+*Check 2: Winsorized spend.* Re-run Analysis 1 using `spend_w95` (raw `spend` capped at the 95th percentile of *positive* spenders, $\$362$, per the construction in Section 2 Item 3). Save results and visualize as a side-by-side raw-vs-winsorized forest plot in the same panel layout as @fig-recency.
 
-*Concern:* A handful of large spenders may drive the per-bin lifts. If the winsorized estimates have the same direction and rough ranking as the raw estimates, the headline is not an outlier story. If a result vanishes after winsorizing, the raw lift is driven by a few large purchases and the targeting recommendation for that bin needs to be qualified accordingly.
+*Concern:* A few large spenders may drive the per-bin lifts. If a bin's lift vanishes after winsorizing, the recommendation for that bin needs to be qualified.
 
-*Check 3: Covariate balance.* For each pre-treatment covariate (`recency`, `history`, `mens`, `womens`, `newbie`, `zip_code`, `channel`), compute per-arm means (continuous/binary) or per-arm shares (categorical) with 95% CIs. Flag standardized mean differences $|\mathrm{SMD}| > 0.10$ for numeric/binary covariates and share differences $> 2$ percentage points for categorical levels. Visualize as a multi-panel figure (one panel per covariate or per categorical level), three colored points with CIs per panel; overlapping CIs across the three arms is the signal that randomization worked.
+*Check 3: Covariate balance, overall and within recency bin.* For each pre-treatment covariate (`recency`, `history`, `mens`, `womens`, `newbie`, `zip_code`, `channel`), compute per-arm means (continuous/binary) or per-arm shares (categorical) with 95% CIs. Flag standardized mean differences $|\mathrm{SMD}| > 0.10$ for numeric/binary covariates and share differences $> 2$ percentage points for categorical levels. Visualize as a multi-panel figure (one panel per covariate or per categorical level), three colored points with CIs per panel; overlapping CIs across the three arms is the signal that randomization worked. Repeat the balance check stratified by `recency_bin` — produce a 4 × $k$ grid of bin-by-covariate panels. Apply the same imbalance flags within each bin (with the understanding that per-bin SEs are wider and small imbalances may pass the screen even when they would not in the pooled sample).
 
-*Concern:* If any covariate is systematically imbalanced — non-overlapping CIs across arms — the random assignment may have been implemented incorrectly, which would undermine the causal interpretation of every estimate above. With $n = 64{,}000$ the standard errors are tight, so even small genuine imbalances become detectable; passing this check is a non-trivial confirmation that the randomization held.
+*Concern:* Systematic imbalance would undermine the causal interpretation of every estimate above. The stratified version is a stronger test for this plan in particular: the targeting story rests on per-bin ATEs, so each `recency_bin` needs to be balanced internally — especially on `history`, `mens`, and `womens`, the most plausible alternative drivers of within-bin spend differences.
+
+```{r}
+#| echo: false
+#| fig-width: 7.5
+#| fig-height: 4.5
+#| fig-cap: "Illustrative balance figure (hypothetical numbers). All seven pre-experiment covariates across the three arms; whiskers = 95% CIs. For categorical covariates (`zip_code`, `channel`) one representative level is shown; the full figure has one panel per level. Overlapping CIs across arms within each panel is the signal that randomization worked. Real estimates will replace these mock values."
+
+balance_mock <- tibble::tribble(
+  ~covariate,             ~arm,        ~mean,   ~lo,    ~hi,
+  "history ($)",          "Control",   242.0,  239.5,  244.5,
+  "history ($)",          "Mens",      243.5,  241.0,  246.0,
+  "history ($)",          "Womens",    241.5,  239.0,  244.0,
+  "recency (months)",     "Control",     5.76,   5.71,   5.81,
+  "recency (months)",     "Mens",        5.79,   5.74,   5.84,
+  "recency (months)",     "Womens",      5.78,   5.73,   5.83,
+  "mens share",           "Control",     0.551,  0.544,  0.558,
+  "mens share",           "Mens",        0.548,  0.541,  0.555,
+  "mens share",           "Womens",      0.553,  0.546,  0.560,
+  "womens share",         "Control",     0.550,  0.543,  0.557,
+  "womens share",         "Mens",        0.552,  0.545,  0.559,
+  "womens share",         "Womens",      0.547,  0.540,  0.554,
+  "newbie share",         "Control",     0.502,  0.495,  0.509,
+  "newbie share",         "Mens",        0.497,  0.490,  0.504,
+  "newbie share",         "Womens",      0.504,  0.497,  0.511,
+  "zip: Suburban share",  "Control",     0.450,  0.443,  0.457,
+  "zip: Suburban share",  "Mens",        0.448,  0.441,  0.455,
+  "zip: Suburban share",  "Womens",      0.452,  0.445,  0.459,
+  "channel: Web share",   "Control",     0.441,  0.434,  0.448,
+  "channel: Web share",   "Mens",        0.443,  0.436,  0.450,
+  "channel: Web share",   "Womens",      0.439,  0.432,  0.446
+) |>
+  mutate(
+    arm = factor(arm, levels = c("Control", "Mens", "Womens")),
+    covariate = factor(covariate, levels = c(
+      "history ($)", "recency (months)", "mens share",
+      "womens share", "newbie share",
+      "zip: Suburban share", "channel: Web share"
+    ))
+  )
+
+ggplot(balance_mock, aes(x = arm, y = mean, color = arm)) +
+  geom_pointrange(aes(ymin = lo, ymax = hi), size = 0.3) +
+  facet_wrap(~ covariate, scales = "free_y", ncol = 4) +
+  scale_color_manual(
+    values = c("Control" = "grey60",
+               "Mens" = "#7B83C2",
+               "Womens" = "#E89BAB"),
+    guide = "none"
+  ) +
+  labs(x = NULL, y = "Mean / share") +
+  theme_minimal(base_size = 8) +
+  theme(panel.spacing = unit(0.6, "lines"),
+        axis.text.x = element_text(size = 7))
+```
+
+```{r}
+#| echo: false
+#| fig-width: 7.5
+#| fig-height: 5
+#| fig-cap: "Illustrative stratified balance figure (hypothetical numbers). The balance check repeated within each `recency_bin` (rows), shown for three representative covariates (columns). The full figure extends to all six non-recency covariates. For each cell, overlapping CIs across the three arms is the signal that randomization held within that recency bin. Per-bin SEs are wider than the pooled-sample SEs, so small imbalances may pass the screen even when they would not at the pooled level. Real estimates will replace these mock values."
+
+bins_levels <- c("Warm", "Cooling", "Dormant", "Very dormant")
+arms_levels <- c("Control", "Mens", "Womens")
+
+balance_strat_mock <- expand_grid(
+  bin = bins_levels,
+  covariate = c("history ($)", "newbie share", "mens share"),
+  arm = arms_levels
+) |>
+  mutate(
+    base = case_when(
+      covariate == "history ($)"   ~ 242,
+      covariate == "newbie share"  ~ 0.50,
+      covariate == "mens share"    ~ 0.55
+    ),
+    bin_shift = case_when(
+      bin == "Warm"          ~ 1.06,
+      bin == "Cooling"       ~ 0.99,
+      bin == "Dormant"       ~ 0.97,
+      bin == "Very dormant"  ~ 0.95
+    ),
+    arm_jitter = case_when(
+      arm == "Control" ~ 0.998,
+      arm == "Mens"    ~ 1.004,
+      arm == "Womens"  ~ 1.000
+    ),
+    mean = base * bin_shift * arm_jitter,
+    half = case_when(
+      covariate == "history ($)"   ~ 5,
+      covariate == "newbie share"  ~ 0.012,
+      covariate == "mens share"    ~ 0.012
+    ),
+    lo = mean - half,
+    hi = mean + half,
+    bin = factor(bin, levels = bins_levels),
+    arm = factor(arm, levels = arms_levels),
+    covariate = factor(covariate, levels = c("history ($)", "newbie share", "mens share"))
+  )
+
+ggplot(balance_strat_mock, aes(x = arm, y = mean, color = arm)) +
+  geom_pointrange(aes(ymin = lo, ymax = hi), size = 0.25) +
+  ggh4x::facet_grid2(bin ~ covariate, scales = "free_y", independent = "y", switch = "y") +
+  scale_color_manual(
+    values = c("Control" = "grey60",
+               "Mens" = "#7B83C2",
+               "Womens" = "#E89BAB"),
+    guide = "none"
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 8) +
+  theme(panel.spacing = unit(0.4, "lines"),
+        axis.text.x = element_text(size = 7),
+        strip.text.y.left = element_text(angle = 0))
+```
+
+*Check 4: Bootstrap confidence intervals.* Re-compute every CI in @fig-overall, @fig-recency, and @fig-funnel by resampling with replacement instead of using the formula in the CI note. For each (bin, arm, outcome) cell, draw 1,000 bootstrap samples of the same size as the original cell, recompute the lift each time, and take the 2.5th and 97.5th percentiles of the bootstrap distribution as the CI endpoints. Compare side-by-side with the formula CIs.
+
+*Concern:* `spend` is 99% zeros with rare large positive values; the formula CIs assume rough normality and may understate uncertainty in the upper tail. Flag any cell where formula and bootstrap CIs disagree on whether zero is excluded — those are the verdict flips, and we trust the bootstrap on them.
+
+*Check 5: Alternative bin definitions.* Re-run @fig-recency with three alternative bin definitions and compare side by side with the headline 3-month version:
+
+1. **Coarser equal-width bins (4-month windows):** 3 bins — recency 1–4, 5–8, 9–12.
+2. **Finer equal-width bins (2-month windows):** 6 bins — recency 1–2, 3–4, 5–6, 7–8, 9–10, 11–12.
+3. **Data-driven quartile bins:** 4 bins, each holding 25% of customers based on the empirical recency distribution (rather than equal calendar widths). Because the recency distribution is concentrated at recent values, these cutoffs differ from the calendar-based 3-month windows and provide a "let the data speak" alternative to the lifecycle-driven choice.
+
+*Concern:* The recency-gradient story might be sensitive to where the cuts fall. If the gradient persists across all four bin specifications, the targeting recommendation is robust to the choice; if it only shows up at 3 months, the result is fragile and we'd disclose that explicitly.
+
+*Check 6: Placebo test.* Randomly shuffle the `segment` labels among the 64,000 customers (preserving the per-arm sizes) and re-run @fig-recency on the shuffled data. Repeat 100 times and look at the distribution of per-bin lifts under the shuffled assignment. Under the null — i.e., if random assignment is working as designed — every shuffled lift should be near zero with a 95% CI that straddles zero, because the shuffle destroys any real treatment-control distinction.
+
+*Concern:* If the real @fig-recency lifts sit in the extreme tail of the shuffled distribution, the signal is real. This is a stronger sanity check than covariate balance because it stresses the whole estimation procedure end-to-end.
+
+*Check 7: Outcome consistency.* The headline outcome is `spend`, but @fig-funnel also estimates per-bin lifts on `visit` and `conversion`. As a check, confirm the *rank ordering of recency bins* is the same across all three outcomes — i.e., does the bin with the largest spend lift also have the largest visit lift and the largest conversion lift?
+
+*Concern:* If `visit`, `conversion`, and `spend` give different per-bin rankings, the targeting recommendation depends on which we optimize for; we'd report the disagreement and stick with `spend` as the closest proxy for incremental revenue.

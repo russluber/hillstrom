@@ -9,7 +9,7 @@
 ## Sample construction
 - Out-of-range recency (<1 or >12): 0
 - Customers excluded from bin analyses (unbinnable): 0
-- Winsorization cutoff (p99 of full sample): $0.00
+- Winsorization cutoff (p95 of positive spenders): $362.20
 - Per-bin × arm cell counts available in tables/table2_recency_arm_counts.csv.
 
 ## Baseline overall email effects
@@ -35,7 +35,7 @@
 
 ## Analysis 4: Robustness and credibility checks
 - All recency × arm cells have n ≥ 500: **TRUE**.
-- Winsorized vs raw direction agreement across (bin × comparison): **0%**.
+- Winsorized vs raw direction agreement across (bin × comparison): **100%**.
 - Covariate-balance flags (numeric SMD > 0.10 or categorical share diff > 2pp): **0**.
 
 ## Final managerial takeaway
@@ -46,4 +46,4 @@
 - **Cooling**: Either email — Either email, no clear winner. Mens lift $0.4884 [$0.0089, $0.9679]; Womens lift $0.6655 [$0.1098, $1.2211].
 - **Dormant**: Either email — Either email, no clear winner. Mens lift $0.6051 [$0.0642, $1.1460]; Womens lift $0.2995 [$-0.2485, $0.8475].
 - **Very dormant**: Either email — Either email, no clear winner. Mens lift $0.7721 [$0.2094, $1.3347]; Womens lift $0.4100 [$-0.0218, $0.8418].
-- Robustness: cell sizes all sufficient; winsorized direction agreement 0%; 0 balance flags.
+- Robustness: cell sizes all sufficient; winsorized direction agreement 100%; 0 balance flags.
