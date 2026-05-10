@@ -11,3 +11,9 @@
 .RData
 .Ruserdata
 /.quarto/
+
+# macOS metadata
+.DS_Store
+
+# Runner's HTML side-output from quarto render
+implement_draft_analyses.html

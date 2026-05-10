@@ -127,12 +127,14 @@ data <- data |>
 ```
 
 ```{r section2-winsorized-spend}
-# Winsorize at the 99th percentile of the full analysis sample (NOT by arm
-# or by recency bin, per the plan). Used in robustness only — the main
-# analysis uses raw spend.
-spend_p99 <- quantile(data$spend, 0.99, na.rm = TRUE)
-data <- data |> mutate(spend_w99 = pmin(spend, spend_p99))
-spend_p99
+# Winsorize at the 95th percentile of *positive spenders* (NOT by arm or by
+# recency bin, per the plan). p99 of positive spenders coincides with the
+# source top-code at $499 (max spend), so it's a no-op. p95 caps the top ~5%
+# of positive spenders (~29 customers at $362). Used in robustness only —
+# the main analysis uses raw spend.
+spend_p95 <- quantile(data$spend[data$spend > 0], 0.95, na.rm = TRUE)
+data <- data |> mutate(spend_w95 = pmin(spend, spend_p95))
+spend_p95
 ```
 
 ```{r section2-table2}
@@ -857,17 +859,17 @@ any_small_cells <- nrow(small_cells) > 0
 ```
 
 ```{r analysis4-table7-winsor}
-# Check 2: re-run Analysis 1 on spend_w99 (winsorized at the full-sample p99).
+# Check 2: re-run Analysis 1 on spend_w95 (winsorized at p95 of positive spenders).
 table7 <- data |>
   filter(!is.na(recency_bin)) |>
   group_by(recency_bin) |>
   group_modify(~ map_dfr(comparisons, function(cmp) {
-    te_row(.x, "spend_w99", cmp$t, cmp$c, cmp$label)
+    te_row(.x, "spend_w95", cmp$t, cmp$c, cmp$label)
   })) |>
   ungroup() |>
   mutate(
-    spend_variable = "spend_w99",
-    winsor_cutoff  = spend_p99
+    spend_variable = "spend_w95",
+    winsor_cutoff  = spend_p95
   )
 
 write_csv(table7, "tables/table7_winsorized_robustness.csv")
@@ -1053,10 +1055,10 @@ policy_lines <- table6 |>
 winsor_compare <- table4 |>
   select(recency_bin, comparison, raw_estimate = estimate) |>
   inner_join(
-    table7 |> select(recency_bin, comparison, w99_estimate = estimate),
+    table7 |> select(recency_bin, comparison, w95_estimate = estimate),
     by = c("recency_bin", "comparison")
   ) |>
-  mutate(direction_match = sign(raw_estimate) == sign(w99_estimate))
+  mutate(direction_match = sign(raw_estimate) == sign(w95_estimate))
 
 direction_agreement <- mean(winsor_compare$direction_match, na.rm = TRUE)
 
@@ -1078,7 +1080,7 @@ summary_md <- c(
   "## Sample construction",
   sprintf("- Out-of-range recency (<1 or >12): %d", n_out),
   sprintf("- Customers excluded from bin analyses (unbinnable): %d", n_unbinned),
-  sprintf("- Winsorization cutoff (p99 of full sample): $%.2f", spend_p99),
+  sprintf("- Winsorization cutoff (p95 of positive spenders): $%.2f", spend_p95),
   "- Per-bin × arm cell counts available in tables/table2_recency_arm_counts.csv.",
   "",
   "## Baseline overall email effects",

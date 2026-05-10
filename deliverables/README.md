@@ -4,7 +4,7 @@ Files submitted for the assignment. The `.qmd` sources are tracked in this repo;
 
 ## Rendered PDFs
 
-> **Dropbox link:** TBD
+> **Dropbox link:** https://www.dropbox.com/scl/fo/zbnan4bqwa7xpq7tlg3gs/ABWpD9UejEo5nQLWJMzKCKg?rlkey=plth3q8g6kfwjgshrxxz434pb&st=uvof5rhz&dl=0
 
 ## Sources tracked here
 
